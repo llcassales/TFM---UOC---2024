@@ -1,0 +1,1759 @@
+---
+title: "TFM - Msc. Data acience"
+author: "Lucas Sales da Silva"
+date: "2024-03-11"
+output: html_document
+---
+
+# Import Libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/marig/Desktop/TFM-Lucas")
+#setwd("C:/Users/Lucas Sales/Desktop/TFM - UOC/Ecommerce_Analysis")
+library(plyr)
+library(e1071)
+library(randomForest)
+library(factoextra)
+library(Hmisc)
+library(ggplot2)
+library(NbClust)
+library(cluster)
+library(dplyr)
+library(rpart)
+library(purrr)
+library(caret)
+library(corrplot)
+library(randomForestExplainer)
+```
+
+## Import and Exploration
+
+
+The dataset contains categorical and numerical data. It also contains dates of user actions.
+
+Categorical data can be divided in data describing the user, the content consumed or the channel used for the contact.
+
+In data describing attributes of the users we have:"IND_CLIENTE" defines as a buyer or not,"TIPOUSUARIO" and "USU_TIPO"  defining if it is a company and its type or private individual, "USU_SECTOR" is self explanatory, complete list of sectors (see appendix X), USU_DEPARTAMENTO geographical region within Colombia of the user, "USU_RANGOINGRESOS" brings information about users revenue, "TIPOCOMPRADOR" and "TIPOCLIENTE" describe users.
+
+For Data describing channels utilized we have: "CANAL_REGISTRO" the channel were the user registered, "BONDAD_EMAIL" describe status of email campaign to the user, "CANAL_VENTA" if the channel is web or callcenter, "CLIENTEPORCAMPAÑA" signs that the user was engaged by a email campaign.
+
+About the content being consulted we have the variable "RANKEMPRESA" describing how many times that specific company file was consulted.
+
+The numerical variables available in the dataset bring mainly information about users sessions and consuming behaviors. Some examples are "NUMDIASCONSUMO", "MAXSESIONESDIA" and "FICHASCONSUMIDAS". 
+
+Variables NUMEROCOMPRAS, IMPORTEVENTAS,CLIENTEPORCAMPAÑA have median 0, as they are only present in actual clients and the dataset is not balanced. "EMPCONSUL_SECTOR" is only NAs and will be removed.
+
+NUMCONSUMOSULTDIA, PEFILESCONSUMIDOS, FICHACONSUMIDAS have a clear relation between them where NUMCONSUMOSULTDIA - PEFILESCONSUMIDOS  = FICHACONSUMIDAS
+
+NUMCONSUMOSULTDIA and NUMDIASCONSUMO have the same data.
+
+Based on a quick exploratory analysis using commends "str", "head" and "summary" - we could observe:
+
+```{r Import_exp}
+users <- read.delim("C:/Users/marig/Desktop/TFM-Lucas/USUARIOS_NEW.txt", sep = "|", header = TRUE, encoding = "Latin-1", stringsAsFactors = F, check.names = FALSE)
+data.frame(str(users))
+
+head(users)
+
+
+```
+
+## NA´s analysis
+
+In order to facilitate next steps in data exploration we will remove columns that do not add relevant information and get a list of categorical columns:
+
+Remove the variables that have linear relations or that are dependant on user being a customer:
+```{r}
+users <- subset(users, select = -c(EMPCONSUL_SECTOR,TIPOCLIENTE,NUMEROCOMPRAS,IMPORTEVENTAS, CANAL_VENTA, CLIENTECPC,TIPOCOMPRADOR))
+```
+
+
+## Categorical Columns
+
+Create a vector with the columnames of the categorical variables.
+
+```{r}
+# Get the names of all columns
+all_columns <- names(users)
+users$CANAL_REGISTRO <- factor(users$CANAL_REGISTRO)
+
+
+# Filter out the categorical columns
+categorical_columns <- all_columns[sapply(users, function(x) is.character(x) | is.factor(x))]
+
+# Remove "IDUSUARIO" from the list if it exists
+categorical_columns <- categorical_columns[categorical_columns != "IDUSUARIO"]
+categorical_columns
+```
+We can observe that the only numeric columns with Na's are:
+
+```{r}
+print(colSums(is.na(users)))
+```
+
+CANAL_REGISTRO - 3521 - 1 relates to SEM, 4 Own Website. 2, 3, and 7 are popular directories. The rest are specialized directories
+CLIENTEPORCAMPAnA - 139961 - Captured by email campaign 1 - Yes, if captured
+EMPCONSUL_SECTOR  - 142724 - Describes the industry of the customer´s company.
+
+
+## Check count of values in the other variables.
+
+The variables "USU_SECTOR", "TIPOCOMPRADOR", "USU_RANGOINGRESOS", "TIPOCLIENTE", "USU_Sector" have mostly null values and some of the levels have too few observations, for this reason the variable was dropped from the dataset.
+
+"USU_TIPO" brings the same info as "TIPOUSUARIO" and will also be dropped.
+
+```{r}
+
+exclude_columns <- c("FEC_REGISTRO", "FEC_CLIENTE", "USU_TIPO" , "USU_SECTOR")
+categorical_columns <- setdiff(categorical_columns, exclude_columns)
+
+# Subset the dataframe using the categorical column names
+users[, categorical_columns] <- lapply(users[, categorical_columns], as.factor)
+selected_data <- users[, categorical_columns, drop = FALSE]
+
+# Apply the table() function to each column
+value_counts <- lapply(selected_data, table)
+
+# Display the count of each value in each column
+print(value_counts)
+
+rm(selected_data)
+rm(value_counts)
+rm(exclude_columns)
+```
+
+# Study of the target variable
+
+## Distribution and Imbalance
+Understand the structure of the target variable. Checking how imbalanced is this Dataset, 1 has bought, 0 is not a customer:
+
+```{r}
+table(users$IND_CLIENTE)
+prop.table(table(users$IND_CLIENTE)) * 100
+
+```
+Explore the relationship between target variable and other categorical variables.Generate contingency tables for each variable.
+
+```{r}
+
+# Remove specified columns
+categorical_columns <- setdiff(categorical_columns, c("IDUSUARIO", "FEC_CLIENTE","FEC_REGISTRO", "USU_TIPO", "USU_SECTOR"))
+
+# Generate contingency tables
+contingency_tables <- lapply(categorical_columns, function(col) {
+  table(users$IND_CLIENTE, users[[col]])
+})
+
+# Output results
+names(contingency_tables) <- categorical_columns
+contingency_tables
+
+
+```
+
+
+We reduced the levels of the variables USU_DEPARTAMENTO removing different regions and changing the values to Capital and Interior. 
+CANAL_REGISTRO was also grouped in three categories as displayed below.
+$USU_RANGOINGRESOS will also be grouped in only three levels as there are some of them that are too small
+
+
+```{r}
+# Replace "BOGOTA" with "CAPITAL", leave empty values empty, and change the rest to "INTERIOR"
+users$USU_DEPARTAMENTO <- ifelse(users$USU_DEPARTAMENTO == "BOGOTA", "CAPITAL", ifelse(users$USU_DEPARTAMENTO == "", "", "INTERIOR"))
+
+# REducing levels of variable CANAL_REGISTRO
+users$CANAL_REGISTRO <- ifelse(users$CANAL_REGISTRO == 1, "SEM",
+                               ifelse(users$CANAL_REGISTRO == 4, "Web Propia",
+                                      ifelse(users$CANAL_REGISTRO %in% c(2, 3, 7), "Popular directories",
+                                             "Specialized Directories")))
+
+users$USU_RANGOINGRESOS <- ifelse(users$USU_RANGOINGRESOS ==  "< 1500M", "< 1500M",
+                               ifelse(users$USU_RANGOINGRESOS == "DESCONOCIDO", "DESCONOCIDO", ">1500M"))
+users<- subset(users, select = -USU_SECTOR)
+users<- subset(users, select = -USU_TIPO)
+```
+Divide dataset between PF and PJ
+
+```{r}
+# Create the PF_users DataFrame
+PF_users <- subset(users, TIPOUSUARIO == "PF")
+
+# Create the PJ_users DataFrame
+PJ_users <- subset(users, TIPOUSUARIO == "PJ")
+```
+
+
+## Chi Squared Test
+
+Chi Squared test to decide which variables to add to the model. This model contrast each categorical variable vs the response.
+
+```{r}
+
+# Function to perform chi-squared test for a single categorical variable
+perform_chi_squared_test <- function(column_name, dataframe) {
+  dataframe <- dataframe[complete.cases(dataframe[,column_name]),]
+  cross_table <- table(dataframe[[column_name]], dataframe$IND_CLIENTE)
+  chi_squared_result <- chisq.test(cross_table)
+  return(chi_squared_result)
+}
+
+# Perform chi-squared test for each categorical variable
+results <- map(categorical_columns, ~ perform_chi_squared_test(.x, users))
+
+# Print results
+names(results) <- categorical_columns
+print(results)
+rm(results)
+
+```
+
+
+
+# Walds-Test
+First I applied a logistic regression including all the variables. In a second step, I ran a Walds test in which all possible models ares contrasted, beggining with the most simple one and comparing it with models increasing one predictor at the time. The result will provide information regarding the relevance and the contribution of each predictor on the Y.
+
+https://stats.stackexchange.com/questions/59879/logistic-regression-anova-chi-square-test-vs-significance-of-coefficients-ano
+
+
+```{r}
+model <- glm(IND_CLIENTE ~ USU_DEPARTAMENTO + TIPOUSUARIO + CANAL_REGISTRO + USU_RANGOINGRESOS , data = users, family = "binomial", maxit = 1000)
+summary(model)
+anova(model, test="Chi")
+rm(model)
+
+```
+
+
+
+
+## Study of numerical variables correlation
+
+In order to identify variables that could help to explain the target variable or that contain overlapping information we performed a correlation study. First we extracted numerical variables of interest from dataset and changed NA values for 0. Then we created a correlation matrix using Pearson Correlation. Correlation implies association between variables, if these variables are independent, the value of one of them does not reveal anything about the value of the other.In everyday language, dependence, association and correlation are used interchangeably. Technically, however, association is synonymous with dependence and is different from correlation (Fig. 1a). Association is a very general relationship: one variable provides information about another. Correlation is more specific: two variables are correlated when they display an increasing or decreasing trend (Naomi, 2015)
+
+From the correlation matrix we can observe:
+NUMCONSUMOSULTDIA, PEFILESCONSUMIDOS, FICHACONSUMIDAS have a clear relation between them where NUMCONSUMOSULTDIA - PEFILESCONSUMIDOS  = FICHACONSUMIDAS
+
+We will remove NUMCONSUMOLTDIA, FICHACONSUMIDA, NUMEMPRESASBUSCADAS  for being highly correlated to TOTALSEISIONES. MAXCONSUMOUNDIA will be removed for having a high correlation with MAXSESIONESDIA.
+
+Highest correlation found between following variables TOTALSESIONES vs NUMEMPRESASBUSCADAS (0.99), FICHASCONSUMIDAS vs TOTALSESIONES (0.99), TOTALSESIONES vs NUMCONSUMOSULTDIA(0.99) MAXSESIONESDIA vs MAXCONSUMOUNDIA(0.96), FICHASCONSUMIDAS  vs NUMEMPRESASBUSCADAS (0.98)
+
+```{r}
+# Creating a vector with the specified column names
+columns <- c("MAXCONSUMOUNDIA","TOTALSESIONES", "MAXSESIONESDIA", "FICHASCONSUMIDAS", "NUMEMPRESASBUSCADAS", "PEFILESCONSUMIDOS", "NUMCONSUMOSULTDIA")
+
+# Extracting the required columns from the dataframe
+data <- users[, columns]
+
+# Handling missing values by replacing them with 0
+data[is.na(data)] <- 0
+
+# Building the correlation matrix
+correlation_matrix <- rcorr(as.matrix(data), type = "pearson")
+print(correlation_matrix)
+
+
+# Plotting the correlation matrix
+corrplot(correlation_matrix$r, method = "color", type = "upper", addrect = 2, is.corr = FALSE, col = COL1('Blues', 30))
+
+rm(data)
+
+```
+In order to depict better the correlation of the aforementioned variables, we plotted scatter plots displaying each pair of highly correlated variables.
+
+```{r}
+# OK Scatterplot for TOTALSESIONES vs FICHASCONSUMIDAS
+ggplot(users, aes(x = TOTALSESIONES, y = FICHASCONSUMIDAS)) +
+  geom_point() +
+  labs(x = "TOTALSESIONES", y = "FICHASCONSUMIDAS") +
+  ggtitle("Scatterplot: TOTALSESIONES vs FICHASCONSUMIDAS")
+
+# OK Scatterplot for MAXCONSUMOUNDIA vs MAXSESIONESDIA
+ggplot(users, aes(x = MAXCONSUMOUNDIA, y = MAXSESIONESDIA)) +
+  geom_point() +
+  labs(x = "Max Consumo Undia", y = "Max Sesiones Dia") +
+  ggtitle("Scatterplot: Max Consumption in a Day vs Max Sessions in a Day")
+
+
+# OK Scatterplot for NUMEMPRESASBUSCADAS vs FICHASCONSUMIDAS
+ggplot(users, aes(x = NUMEMPRESASBUSCADAS, y = FICHASCONSUMIDAS)) +
+  geom_point() +
+  labs(x = "NUMEMPRESASBUSCADAS", y = "FICHASCONSUMIDAS") +
+  ggtitle("Scatterplot: Max Consumption in a Day vs FICHASCONSUMIDAS")
+
+# OK Scatterplot for NUMEMPRESASBUSCADAS vs TOTALSESIONES
+ggplot(users, aes(x = NUMEMPRESASBUSCADAS, y = TOTALSESIONES)) +
+  geom_point() +
+  labs(x = "NUMEMPRESASBUSCADAS", y = "Total Sessions") +
+  ggtitle("Scatterplot: Max Consumption in a Day vs Total Sessions")
+
+# OK Scatterplot for FICHASCONSUMIDAS vs NUMCONSUMOSULTDIA
+ggplot(users, aes(x = FICHASCONSUMIDAS, y = NUMCONSUMOSULTDIA)) +
+  geom_point() +
+  labs(x = "FICHASCONSUMIDAS", y = "NUMCONSUMOSULTDIA") +
+  ggtitle("Scatterplot: FICHASCONSUMIDAS vs NUMCONSUMOSULTDIA")
+
+```
+
+In the next step, a Walds test is applied again on the dataset to test the contribution of the remaining variables on the prediction of IND_CLIENTE.
+
+```{r}
+# Fit logistic regression model
+model <- glm(IND_CLIENTE ~ TOTALSESIONES + MAXSESIONESDIA  + PEFILESCONSUMIDOS, data = users, family = binomial)
+
+# Summary of the model
+summary(model)
+
+anova(model, test="Chi")
+
+```
+
+
+# Data Preparation
+
+Variable "EMPCONSUL_SECTOR" was previously removed for being empty. 
+"NUMCONSUMOSULTDIA", "PEFILESCONSUMIDOS", "NUMDIASCONSUMO" were also previously removed because they were equivalent to "FICHACONSUMIDAS"
+
+"NUMEMPRESASBUSCADAS" was removed for having a high correlation with  "Total Sesiones" (0.99)
+"FICHASCONSUMIDAS" was removed for having a high correlation with  "Total Sesiones" (0.99)
+"MAXCONSUMOUNDIA"  was removed for having a high correlation with  "MAXSESIONESDIA" (0.96)
+"FEC_CLIENTE", "FEC_REGISTRO" were removed as dates are outside the scope of the models that will be applied.
+
+Numerical Variables remaining are only MAXSESIONESDIA and TOTAL SESIONES
+For the categorical variables we use the results of the chi test performed in the coefficients of the logistic regression ans we maintained only USU_DEPARTAMENTO, CANAL_REGISTRO, TIPOUSUARIO, USU_RANGOINGRESOS.
+
+For the categorical we used a Chi Squared test to find the variables that were the most important for the model.
+
+
+Final variables chosen: "IND_CLIENTE","TOTALSESIONES", "MAXSESIONESDIA" "PEFILESCONSUMIDOS", "USU_DEPARTAMENTO", "TIPOUSUARIO", "CANAL_REGISTRO", "USU_RANGOINGRESOS"
+
+```{r}
+#Generate main dataset
+categorical_cols <- c("USU_DEPARTAMENTO", "TIPOUSUARIO", "CANAL_REGISTRO", "USU_RANGOINGRESOS")
+
+final_users <- subset(users, select = c("IND_CLIENTE","TOTALSESIONES", "MAXSESIONESDIA", "PEFILESCONSUMIDOS", "USU_DEPARTAMENTO", "TIPOUSUARIO", "CANAL_REGISTRO", "USU_RANGOINGRESOS"))
+
+#Scale Data
+
+final_users[, c("TOTALSESIONES", "MAXSESIONESDIA", "PEFILESCONSUMIDOS")] <- scale(final_users[, c("TOTALSESIONES", "MAXSESIONESDIA", "PEFILESCONSUMIDOS")],center = T, scale = T )
+final_users_raw <- final_users
+
+
+```
+
+# Outliers Check and cleaning
+
+Remove outliers
+
+```{r}
+
+
+# Compute mean and standard deviation of log-transformed variables
+mean_TOTALSESIONES <- mean(final_users$TOTALSESIONES)
+sd_TOTALSESIONES <- sd(final_users$TOTALSESIONES)
+
+mean_PEFILESCONSUMIDOS <- mean(final_users$PEFILESCONSUMIDOS)
+sd_PEFILESCONSUMIDOS <- sd(final_users$PEFILESCONSUMIDOS)
+
+
+mean_MAXSESIONESDIA <- mean(final_users$MAXSESIONESDIA)
+sd_MAXSESIONESDIA <- sd(final_users$MAXSESIONESDIA)
+
+# Identify outliers and remove entire rows based on log-transformed variables
+final_users <- final_users %>%
+  filter(
+    TOTALSESIONES <= mean_TOTALSESIONES + 3 * sd_TOTALSESIONES &
+    TOTALSESIONES >= mean_TOTALSESIONES - 3 * sd_TOTALSESIONES &
+    PEFILESCONSUMIDOS <= mean_PEFILESCONSUMIDOS + 3 * sd_PEFILESCONSUMIDOS &
+    PEFILESCONSUMIDOS >= mean_PEFILESCONSUMIDOS - 3 * sd_PEFILESCONSUMIDOS &
+    MAXSESIONESDIA <= mean_MAXSESIONESDIA + 3 * sd_MAXSESIONESDIA &
+    MAXSESIONESDIA >= mean_MAXSESIONESDIA - 3 * sd_MAXSESIONESDIA
+  )
+
+```
+
+
+
+Categorical checking
+
+```{r}
+
+# Create a function to count empty and NA values
+count_empty_na <- function(x) {
+  sum(is.na(x) | x == "")
+}
+
+
+# Apply the function row-wise to count empty and NA values
+final_users$empty_na_count <- apply(final_users[, c("CANAL_REGISTRO", "TIPOUSUARIO", "USU_DEPARTAMENTO", "USU_RANGOINGRESOS")], 1, count_empty_na)
+
+# Filter out rows with a count greater than 1
+final_users0 <- final_users %>%
+  filter(empty_na_count < 2)
+
+# Remove the entire column empty_na_count
+final_users0 <- final_users0 %>%
+  select(-empty_na_count) 
+
+```
+
+# Check new dataset Distributions
+
+
+```{r}
+# Create contingency table for original dataset
+contingency_table_original <- table(final_users$IND_CLIENTE, final_users$TIPOUSUARIO)
+
+# Create contingency table for cleaned dataset
+contingency_table_cleaned <- table(final_users0$IND_CLIENTE, final_users0$TIPOUSUARIO)
+
+contingency_table_raw <- table(final_users_raw$IND_CLIENTE, final_users_raw$TIPOUSUARIO)
+
+# Display both contingency tables side by side
+print("Contingency Table for Original Dataset (final_users):")
+print(contingency_table_original)
+print("\nContingency Table for Cleaned Dataset (final_users0):")
+print(contingency_table_cleaned)
+print("\nContingency Table for raw Dataset (final_users_raw):")
+print(contingency_table_raw)
+```
+
+
+# Encoding
+
+
+```{r}
+
+variables_to_encode <- c("USU_DEPARTAMENTO", "CANAL_REGISTRO", "TIPOUSUARIO", "USU_RANGOINGRESOS")
+final_users0[final_users0 == ""] <- NA  # To convert all empty spaces into NA (needed for encoding)
+formula <- as.formula(paste("~", paste(variables_to_encode, collapse = " + "))) # generates 
+model.frame <- model.frame(formula, data = final_users0[,variables_to_encode],
+            subset = NULL, na.action= NULL,
+            drop.unused.levels = FALSE, xlev = NULL) # creates a new dataframe with the NA values allowed 
+
+dummy <- dummyVars(formula, data = model.frame)
+final_users_encoded <- data.frame(predict(dummy, newdata = model.frame))
+
+
+final_users_encoded <- cbind(final_users0[,c(1:4)], final_users_encoded)
+
+
+final_users_encoded[is.na(final_users_encoded)] <- 0
+
+colnames(final_users_encoded)
+
+
+```
+
+
+```{r}
+
+# Transform categorical variables into factors
+columns_to_factor <- c("USU_DEPARTAMENTOCAPITAL",
+                       "USU_DEPARTAMENTOINTERIOR",
+                       "CANAL_REGISTROPopular.directories",
+                       "CANAL_REGISTROSEM",
+                       "CANAL_REGISTROSpecialized.Directories",
+                       "CANAL_REGISTROWeb.Propia",
+                       "TIPOUSUARIO.PF",
+                       "TIPOUSUARIO.PJ",
+                       "USU_RANGOINGRESOS..1500M",
+                       "USU_RANGOINGRESOS.1500M",
+                       "USU_RANGOINGRESOSDESCONOCIDO"
+                       )
+
+for (column_name in columns_to_factor) {
+  final_users_encoded[[column_name]] <- factor(final_users_encoded[[column_name]])
+}
+
+# Dummy variable trap solution (if necessary)
+
+# Remove the "TIPOUSUARIO.PJ" and "USU_RANGOINGRESOS.DESCONOCIDO" columns
+final_users_encoded <- subset(final_users_encoded, select = -c(TIPOUSUARIO.PJ,USU_RANGOINGRESOSDESCONOCIDO))
+
+
+```
+
+# Generate more balanced Datasets
+
+## Undersampling
+
+```{r}
+# Set the seed for reproducibility
+set.seed(42)
+
+# Count the number of observations for each class
+class_counts <- table(final_users_encoded$IND_CLIENTE)
+
+# Find the minority class
+minority_class <- which.min(class_counts)
+print(minority_class)
+
+# Set the number of samples for the minority class
+n_samples_minority <- min(class_counts)
+
+# Perform random undersampling
+undersampled_balanced_users <- final_users_encoded %>%
+  group_by(IND_CLIENTE) %>%
+  sample_n(n_samples_minority) %>%
+  ungroup()
+
+# Check the class distribution in the undersampled dataset
+print(table(undersampled_balanced_users$IND_CLIENTE))
+
+rm(n_samples_minority)
+rm(minority_class)
+write.table(undersampled_balanced_users, "undersampled_balanced_users.txt", quote=FALSE, row.names=FALSE, sep = "\t")
+
+```
+## Oversampling
+
+```{r}
+library(ROSE)
+
+# Perform random oversampling
+oversampled_data <- ovun.sample(IND_CLIENTE ~ ., data = final_users_encoded, method = "over", p = 0.5, seed = 123)
+
+# Create a new dataframe with the oversampled data
+oversampled_df <- data.frame(oversampled_data$data)
+
+# Print class distribution after oversampling
+table(oversampled_df$IND_CLIENTE)
+
+
+```
+
+# Logistic Regression
+
+Normal Dataset
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+final_users_encoded$IND_CLIENTE <- factor(final_users_encoded$IND_CLIENTE )
+# Create a vector of indices for the train and test set
+n_rows <- nrow(final_users_encoded)
+train_index <- sample(1:n_rows, 0.8 * n_rows)
+
+
+# Split data into training and testing sets
+train_data <- final_users_encoded[train_index, ]
+test_data <- final_users_encoded[-train_index, ]
+
+# Define the cross-validation method
+train_control <- trainControl(method = "cv", number = 5)
+
+# Define the model formula
+model_formula <- IND_CLIENTE ~ TOTALSESIONES + MAXSESIONESDIA + PEFILESCONSUMIDOS +
+                 USU_DEPARTAMENTOCAPITAL + USU_DEPARTAMENTOINTERIOR +
+                 CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                 CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia +
+                 TIPOUSUARIO.PF + USU_RANGOINGRESOS..1500M + USU_RANGOINGRESOS.1500M
+
+# Train the logistic regression model with cross-validation
+model_cv <- train(model_formula, data = train_data, method = "glm",
+                  family = binomial, trControl = train_control, maxit = 100)
+
+# Predict on test data
+predictions <- predict(model_cv, newdata = test_data, type = "prob")
+
+# Convert probabilities to binary predictions
+binary_predictions <- ifelse(predictions[,2] > 0.1, 1, 0)
+
+# Create confusion matrix
+conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+
+
+# Plot confusion matrix (assuming you have ggplot2 library installed)
+ggplot(data.frame(conf_matrix), aes(x = Actual, y = Predicted, fill = as.factor(Freq))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  labs(x = "Actual", y = "Predicted") +
+  ggtitle("Confusion Matrix") +
+  theme_minimal()
+# Extract values from confusion matrix
+TP <- conf_matrix[2, 2]  # True Positive
+TN <- conf_matrix[1, 1]  # True Negative
+FP <- conf_matrix[1, 2]  # False Positive
+FN <- conf_matrix[2, 1]  # False Negative
+
+# Calculate accuracy
+accuracy <- (TP + TN) / sum(conf_matrix)
+
+# Calculate recall
+recall <- TP / (TP + FN)
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Calculate F-measure (F1-score)
+f_measure <- 2 * (precision * recall) / (precision + recall)
+
+# Print accuracy, recall, precision, and F-measure
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Recall:", round(recall, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("F-measure:", round(f_measure, 4)))
+
+summary(model)
+```
+```{r}
+# Calculate F1 score, accuracy, recall, and precision for different thresholds
+thresholds <- seq(0.1, 0.9, by = 0.1)  # Threshold values to test
+f1_scores <- numeric(length(thresholds))
+accuracies <- numeric(length(thresholds))
+recalls <- numeric(length(thresholds))
+precisions <- numeric(length(thresholds))
+
+for (i in 1:length(thresholds)) {
+  # Convert probabilities to binary predictions using current threshold
+  binary_predictions <- ifelse(predictions[, 2] > thresholds[i], 1, 0)
+  
+  # Calculate confusion matrix
+  conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+  
+  # Calculate metrics
+  TP <- conf_matrix[2, 2]
+  FP <- conf_matrix[1, 2]
+  FN <- conf_matrix[2, 1]
+  TN <- conf_matrix[1, 1]
+  
+  # Calculate metrics
+  precision <- TP / (TP + FP)
+  recall <- TP / (TP + FN)
+  accuracy <- (TP + TN) / sum(conf_matrix)
+  f1_score <- 2 * precision * recall / (precision + recall)
+  
+  # Store metrics
+  f1_scores[i] <- f1_score
+  accuracies[i] <- accuracy
+  recalls[i] <- recall
+  precisions[i] <- precision
+}
+
+# Find the index of the maximum F1 score
+best_f1_index <- which.max(f1_scores)
+
+# Extract the corresponding threshold value
+best_f1_threshold <- thresholds[best_f1_index]
+
+# Plot the metrics
+plot(thresholds, f1_scores, type = "l", col = "blue", xlab = "Threshold", ylab = "Metric Value", ylim = c(0, 1))
+lines(thresholds, accuracies, type = "l", col = "red")
+lines(thresholds, recalls, type = "l", col = "green")
+lines(thresholds, precisions, type = "l", col = "purple")
+legend("topright", legend = c("F1 Score", "Accuracy", "Recall", "Precision"), col = c("blue", "red", "green", "purple"), lty = 1, cex = 0.8)
+
+# Add text for best F1 threshold
+text(best_f1_threshold, f1_scores[best_f1_index], labels = paste("Best F1 Threshold:", round(best_f1_threshold, 2)), pos = 3, col = "blue")
+
+
+```
+
+
+Undersampled Dataset
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Determine the number of rows in the data
+n_rows <- nrow(undersampled_balanced_users)
+
+
+# Create a vector of indices for the train and test set
+train_index <- sample(1:n_rows, 0.8 * n_rows)
+
+# Split data into training and testing sets
+train_data <- undersampled_balanced_users[train_index, ]
+test_data <- undersampled_balanced_users[-train_index, ]
+
+# Fit logistic regression model on training data with increased maximum iterations
+model <- glm(IND_CLIENTE ~ TOTALSESIONES + MAXSESIONESDIA + PEFILESCONSUMIDOS +
+                  USU_DEPARTAMENTOCAPITAL + USU_DEPARTAMENTOINTERIOR +
+                  CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                  CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia +
+                  TIPOUSUARIO.PF + USU_RANGOINGRESOS..1500M + USU_RANGOINGRESOS.1500M ,data = train_data, family = binomial, maxit = 100)
+
+# Predict on test data
+predictions <- predict(model, newdata = test_data, type = "response")
+
+# Convert probabilities to binary predictions
+binary_predictions <- ifelse(predictions > 0.4, 1, 0)
+
+# Create confusion matrix
+conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+
+
+# Plot confusion matrix (assuming you have ggplot2 library installed)
+library(ggplot2)
+ggplot(data.frame(conf_matrix), aes(x = Actual, y = Predicted, fill = as.factor(Freq))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  labs(x = "Actual", y = "Predicted") +
+  ggtitle("Confusion Matrix") +
+  theme_minimal()
+# Extract values from confusion matrix
+TP <- conf_matrix[2, 2]  # True Positive
+TN <- conf_matrix[1, 1]  # True Negative
+FP <- conf_matrix[1, 2]  # False Positive
+FN <- conf_matrix[2, 1]  # False Negative
+
+# Calculate accuracy
+accuracy <- (TP + TN) / sum(conf_matrix)
+
+# Calculate recall
+recall <- TP / (TP + FN)
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Calculate F-measure (F1-score)
+f_measure <- 2 * (precision * recall) / (precision + recall)
+
+# Print accuracy, recall, precision, and F-measure
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Recall:", round(recall, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("F-measure:", round(f_measure, 4)))
+
+summary(model)
+
+```
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Define the number of folds for cross-validation
+num_folds <- 5
+
+# Create an empty vector to store cross-validation results
+cv_results <- vector("list", length = num_folds)
+
+# Perform cross-validation
+for (fold in 1:num_folds) {
+  # Create indices for the training and testing data for this fold
+  fold_indices <- sample(1:n_rows, size = n_rows * 0.8, replace = FALSE)
+  train_data <- undersampled_balanced_users[fold_indices, ]
+  test_data <- undersampled_balanced_users[-fold_indices, ]
+  
+  # Fit logistic regression model on training data with increased maximum iterations
+  model <- glm(IND_CLIENTE ~ TOTALSESIONES + MAXSESIONESDIA + PEFILESCONSUMIDOS +
+                     USU_DEPARTAMENTOCAPITAL + USU_DEPARTAMENTOINTERIOR +
+                     CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                     CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia +
+                     TIPOUSUARIO.PF + USU_RANGOINGRESOS..1500M + USU_RANGOINGRESOS.1500M ,data = train_data, family = binomial, maxit = 100)
+  
+  # Predict on test data
+  predictions <- predict(model, newdata = test_data, type = "response")
+  
+  # Convert probabilities to binary predictions
+  binary_predictions <- ifelse(predictions > 0.4, 1, 0)
+  
+  # Create confusion matrix
+  conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+  
+  # Store evaluation metrics for this fold
+  cv_results[[fold]] <- list(
+    accuracy = sum(diag(conf_matrix)) / sum(conf_matrix),
+    recall = conf_matrix[2, 2] / sum(conf_matrix[2, ]),
+    precision = conf_matrix[2, 2] / sum(conf_matrix[, 2]),
+    f_measure = 2 * (conf_matrix[2, 2] / sum(conf_matrix[2, ])) * (conf_matrix[2, 2] / sum(conf_matrix[, 2])) / ((conf_matrix[2, 2] / sum(conf_matrix[2, ])) + (conf_matrix[2, 2] / sum(conf_matrix[, 2])))
+  )
+}
+
+# Calculate average evaluation metrics across all folds
+avg_accuracy <- mean(sapply(cv_results, function(x) x$accuracy))
+avg_recall <- mean(sapply(cv_results, function(x) x$recall))
+avg_precision <- mean(sapply(cv_results, function(x) x$precision))
+avg_f_measure <- mean(sapply(cv_results, function(x) x$f_measure))
+
+# Print average evaluation metrics
+print(paste("Average Accuracy:", round(avg_accuracy, 4)))
+print(paste("Average Recall:", round(avg_recall, 4)))
+print(paste("Average Precision:", round(avg_precision, 4)))
+print(paste("Average F-measure:", round(avg_f_measure, 4)))
+
+```
+
+
+OVerSAmpled
+
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Determine the number of rows in the data
+n_rows <- nrow(oversampled_df)
+
+
+# Create a vector of indices for the train and test set
+train_index <- sample(1:n_rows, 0.8 * n_rows)
+
+# Split data into training and testing sets
+train_data <- oversampled_df[train_index, ]
+test_data <- oversampled_df[-train_index, ]
+
+# Fit logistic regression model on training data with increased maximum iterations
+model <- glm(IND_CLIENTE ~ TOTALSESIONES + MAXSESIONESDIA + PEFILESCONSUMIDOS +
+                  USU_DEPARTAMENTOCAPITAL + USU_DEPARTAMENTOINTERIOR +
+                  CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                  CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia +
+                  TIPOUSUARIO.PF + USU_RANGOINGRESOS..1500M + USU_RANGOINGRESOS.1500M ,data = train_data, family = binomial, maxit = 100)
+
+# Predict on test data
+predictions <- predict(model, newdata = test_data, type = "response")
+
+# Convert probabilities to binary predictions
+binary_predictions <- ifelse(predictions > 0.4, 1, 0)
+
+# Create confusion matrix
+conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+
+
+# Plot confusion matrix (assuming you have ggplot2 library installed)
+library(ggplot2)
+ggplot(data.frame(conf_matrix), aes(x = Actual, y = Predicted, fill = as.factor(Freq))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  labs(x = "Actual", y = "Predicted") +
+  ggtitle("Confusion Matrix") +
+  theme_minimal()
+# Extract values from confusion matrix
+TP <- conf_matrix[2, 2]  # True Positive
+TN <- conf_matrix[1, 1]  # True Negative
+FP <- conf_matrix[1, 2]  # False Positive
+FN <- conf_matrix[2, 1]  # False Negative
+
+# Calculate accuracy
+accuracy <- (TP + TN) / sum(conf_matrix)
+
+# Calculate recall
+recall <- TP / (TP + FN)
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Calculate F-measure (F1-score)
+f_measure <- 2 * (precision * recall) / (precision + recall)
+
+# Print accuracy, recall, precision, and F-measure
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Recall:", round(recall, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("F-measure:", round(f_measure, 4)))
+
+summary(model)
+```
+
+
+Test Threshold
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Determine the number of rows in the data
+n_rows <- nrow(oversampled_df)
+
+# Create a vector of indices for the train and test set
+train_index <- sample(1:n_rows, 0.8 * n_rows)
+
+# Split data into training and testing sets
+train_data <- oversampled_df[train_index, ]
+test_data <- oversampled_df[-train_index, ]
+
+# Fit logistic regression model on training data with increased maximum iterations
+model <- glm(IND_CLIENTE ~ TOTALSESIONES + MAXSESIONESDIA + PEFILESCONSUMIDOS +
+                  USU_DEPARTAMENTOCAPITAL + USU_DEPARTAMENTOINTERIOR +
+                  CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                  CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia +
+                  TIPOUSUARIO.PF + USU_RANGOINGRESOS..1500M + USU_RANGOINGRESOS.1500M,
+              data = train_data, family = binomial, maxit = 100)
+
+# Predict on test data
+predictions <- predict(model, newdata = test_data, type = "response")
+
+# Define a range of thresholds to test
+thresholds <- seq(0.1, 0.9, by = 0.1)  # Example range from 0.1 to 0.9 with step 0.1
+
+# Initialize vectors to store performance metrics for each threshold
+precision_vec <- numeric(length(thresholds))
+recall_vec <- numeric(length(thresholds))
+f1_vec <- numeric(length(thresholds))
+
+# Iterate over each threshold
+for (i in seq_along(thresholds)) {
+  threshold <- thresholds[i]
+  
+  # Convert probabilities to binary predictions based on current threshold
+  binary_predictions <- ifelse(predictions > threshold, 1, 0)
+  
+  # Create confusion matrix
+  conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+  
+  # Extract values from confusion matrix
+  TP <- conf_matrix[2, 2]  # True Positive
+  TN <- conf_matrix[1, 1]  # True Negative
+  FP <- conf_matrix[1, 2]  # False Positive
+  FN <- conf_matrix[2, 1]  # False Negative
+  
+  # Calculate precision
+  precision <- TP / (TP + FP)
+  
+  # Calculate recall
+  recall <- TP / (TP + FN)
+  
+  # Calculate F1 score
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+  
+  # Store performance metrics
+  precision_vec[i] <- precision
+  recall_vec[i] <- recall
+  f1_vec[i] <- f1_score
+}
+
+# Find the threshold that maximizes the F1 score
+best_threshold <- thresholds[which.max(f1_vec)]
+best_precision <- precision_vec[which.max(f1_vec)]
+best_recall <- recall_vec[which.max(f1_vec)]
+best_f1_score <- max(f1_vec)
+
+# Print the best threshold and corresponding performance metrics
+cat("Best Threshold:", best_threshold, "\n")
+cat("Best Precision:", best_precision, "\n")
+cat("Best Recall:", best_recall, "\n")
+cat("Best F1 Score:", best_f1_score, "\n")
+
+# Create data frame for plotting
+plot_data <- data.frame(Threshold = thresholds, Recall = recall_vec, Precision = precision_vec, F1_Score = f1_vec)
+
+# Melt the data frame for easier plotting
+plot_data_melted <- reshape2::melt(plot_data, id.vars = "Threshold", variable.name = "Metric", value.name = "Value")
+
+# Plot
+library(ggplot2)
+ggplot(plot_data_melted, aes(x = Threshold, y = Value, color = Metric)) +
+  geom_line() +
+  labs(x = "Threshold", y = "Value", color = "Metric") +
+  ggtitle("Recall, Precision, and F1 Score per Threshold") +
+  theme_minimal()
+
+```
+
+## Divided Dataset
+
+
+Considering the different proportion of purchases between PF and PJ types we decided to divide the dataset and train two different models
+
+$TIPOUSUARIO
+   
+        PF     PJ
+  0 104439  35682
+  1   1266   1337
+
+Correlations study for each dataset
+
+```{r}
+# Function to perform the correlation analysis and plot
+perform_analysis <- function(data) {
+  # Specified column names
+  columns <- c("MAXCONSUMOUNDIA", "TOTALSESIONES", "MAXSESIONESDIA", "FICHASCONSUMIDAS", "NUMEMPRESASBUSCADAS", "PEFILESCONSUMIDOS", "NUMCONSUMOSULTDIA")
+  
+  # Extracting the required columns from the dataframe
+  data_subset <- data[, columns]
+  
+  # Handling missing values by replacing them with 0
+  data_subset[is.na(data_subset)] <- 0
+  
+  # Building the correlation matrix
+  correlation_matrix <- rcorr(as.matrix(data_subset), type = "pearson")
+  print(correlation_matrix)
+  
+  # Plotting the correlation matrix
+  corrplot(correlation_matrix$r, method = "color", type = "upper", addrect = 2, is.corr = FALSE, col = COL1('Blues', 30))
+}
+
+# Split the users dataset into PF_users and PJ_users
+PF_users <- subset(users, TIPOUSUARIO == "PF")
+PJ_users <- subset(users, TIPOUSUARIO == "PJ")
+
+# Perform the analysis on PF_users
+cat("Correlation analysis for PF_users:\n")
+perform_analysis(PF_users)
+
+# Perform the analysis on PJ_users
+cat("Correlation analysis for PJ_users:\n")
+perform_analysis(PJ_users)
+```
+Previous Model Combined: "TOTALSESIONES", "MAXSESIONESDIA", "PEFILESCONSUMIDOS"
+
+PF
+MAXCONSUMOUNDIA vs MAXSESIONESUNDIA (0.96), TOTAL SESIONES VS FICHASCONSUMIDAS (0.99), TOTAL SESIONES VS NUMEMPRESASBUSCADAS (0.99), TOTALSESIONES vs NUMCONSUMOSULTDIA (0.99), FICHASCONSUMIDAS vs NUMCONSUMOSULTDIA (1.0), NUMEMPRESASBUSCADAS vs FICHASCONSUMIDAS (0.98), NUMCONSUMOSULTDIA vs NUMEMPRESASBUSCADAS (0.98)
+
+Chosen columns: "TOTALSESIONES", "MAXSESIONESDIA", "PEFILESCONSUMIDOS"
+
+PJ
+"TOTALSESIONES" has more than 0.8 corr with all apart of "PERFILESCONSUMIDOS" 
+
+Chosen Columns : "TOTALSESIONES", "MAXSESIONESDIA"
+
+
+
+Chi Squared Test Study
+
+PJ ALL three variables USU_DEPARTAMENTO + CANAL_REGISTRO + USU_RANGOINGRESOS are relevant
+PF the only relevant variable seems to be CANAL_REGISTRO
+```{r}
+# Transforming the variables into factors
+users$USU_DEPARTAMENTO <- factor(users$USU_DEPARTAMENTO)
+users$TIPOUSUARIO <- factor(users$TIPOUSUARIO)
+users$CANAL_REGISTRO <- factor(users$CANAL_REGISTRO)
+users$USU_RANGOINGRESOS <- factor(users$USU_RANGOINGRESOS)
+
+
+model_PF <- glm(IND_CLIENTE ~ USU_DEPARTAMENTO + CANAL_REGISTRO + USU_RANGOINGRESOS , data = PF_users, family = "binomial", maxit = 1000)
+summary(model_PF)
+anova(model_PF, test="Chi")
+
+model_PJ <- glm(IND_CLIENTE ~ USU_DEPARTAMENTO + CANAL_REGISTRO + USU_RANGOINGRESOS , data = PJ_users, family = "binomial", maxit = 1000)
+summary(model_PJ)
+anova(model_PJ, test="Chi")
+
+
+rm(model_PF)
+rm(model_PJ)
+
+```
+
+
+# Divided Dataset Prep
+```{r}
+#Generate main dataset
+categorical_cols <- c("USU_DEPARTAMENTO", "CANAL_REGISTRO", "USU_RANGOINGRESOS")
+
+PF_final_users <- subset(PF_users, select = c("IND_CLIENTE","TOTALSESIONES", "MAXSESIONESDIA", "PEFILESCONSUMIDOS", "CANAL_REGISTRO"))
+
+PJ_final_users <- subset(PJ_users, select = c("IND_CLIENTE","TOTALSESIONES", "PEFILESCONSUMIDOS", "USU_DEPARTAMENTO", "CANAL_REGISTRO", "USU_RANGOINGRESOS"))
+
+#Scale Data
+
+PJ_final_users[, c("TOTALSESIONES", "PEFILESCONSUMIDOS")] <- scale(PJ_final_users[, c("TOTALSESIONES", "PEFILESCONSUMIDOS")],center = T, scale = T )
+
+PF_final_users[, c("TOTALSESIONES", "MAXSESIONESDIA", "PEFILESCONSUMIDOS")] <- scale(PF_final_users[, c("TOTALSESIONES", "MAXSESIONESDIA", "PEFILESCONSUMIDOS")],center = T, scale = T )
+
+```
+
+Remove outliers PF_final_users
+```{r}
+
+# Compute mean and standard deviation of log-transformed variables
+PF_final_users_mean_TOTALSESIONES <- mean(PF_final_users$TOTALSESIONES)
+PF_final_users_sd_TOTALSESIONES <- sd(PF_final_users$TOTALSESIONES)
+
+PF_final_users_mean_PEFILESCONSUMIDOS <- mean(PF_final_users$PEFILESCONSUMIDOS)
+PF_final_users_sd_PEFILESCONSUMIDOS <- sd(PF_final_users$PEFILESCONSUMIDOS)
+
+
+PF_final_users_mean_MAXSESIONESDIA <- mean(PF_final_users$MAXSESIONESDIA)
+PF_final_users_sd_MAXSESIONESDIA <- sd(PF_final_users$MAXSESIONESDIA)
+
+# Identify outliers and remove entire rows based on log-transformed variables
+PF_final_users <- PF_final_users %>%
+  filter(
+    TOTALSESIONES <= PF_final_users_mean_TOTALSESIONES + 3 * PF_final_users_sd_TOTALSESIONES &
+    TOTALSESIONES >= PF_final_users_mean_TOTALSESIONES - 3 * PF_final_users_sd_TOTALSESIONES &
+    PEFILESCONSUMIDOS <= PF_final_users_mean_PEFILESCONSUMIDOS + 3 * PF_final_users_sd_PEFILESCONSUMIDOS &
+    PEFILESCONSUMIDOS >= PF_final_users_mean_PEFILESCONSUMIDOS - 3 * PF_final_users_sd_PEFILESCONSUMIDOS &
+    MAXSESIONESDIA <= PF_final_users_mean_MAXSESIONESDIA + 3 * PF_final_users_sd_MAXSESIONESDIA &
+    MAXSESIONESDIA >= PF_final_users_mean_MAXSESIONESDIA - 3 * PF_final_users_sd_MAXSESIONESDIA
+  )
+
+```
+
+Remove outliers PJ_final_users
+
+```{r}
+# Compute mean and standard deviation of log-transformed variables
+PJ_final_users_mean_TOTALSESIONES <- mean(PJ_final_users$TOTALSESIONES)
+PJ_final_users_sd_TOTALSESIONES <- sd(PJ_final_users$TOTALSESIONES)
+
+PJ_final_users_mean_PEFILESCONSUMIDOS <- mean(PJ_final_users$PEFILESCONSUMIDOS)
+PJ_final_users_sd_PEFILESCONSUMIDOS <- sd(PJ_final_users$PEFILESCONSUMIDOS)
+
+
+# Identify outliers and remove entire rows based on log-transformed variables
+PF_final_users <- PF_final_users %>%
+  filter(
+    TOTALSESIONES <= PJ_final_users_mean_TOTALSESIONES + 3 * PJ_final_users_sd_TOTALSESIONES &
+    TOTALSESIONES >= PJ_final_users_mean_TOTALSESIONES - 3 * PJ_final_users_sd_TOTALSESIONES &
+    PEFILESCONSUMIDOS <= PJ_final_users_mean_PEFILESCONSUMIDOS + 3 * PJ_final_users_sd_PEFILESCONSUMIDOS &
+    PEFILESCONSUMIDOS >= PJ_final_users_mean_PEFILESCONSUMIDOS - 3 * PJ_final_users_sd_PEFILESCONSUMIDOS)
+
+```
+
+
+
+# Categorical check
+
+As PF has only one Categorical Variable we will not remove any rows based on empty values on them.
+
+In the case of PJ we will remove any rows with 2/3 of categorical variables empty.
+```{r}
+
+# Create a function to count empty and NA values
+count_empty_na <- function(x) {
+  sum(is.na(x) | x == "")
+}
+
+
+# Apply the function row-wise to count empty and NA values
+PJ_final_users$empty_na_count <- apply(PJ_final_users[, c("CANAL_REGISTRO", "USU_DEPARTAMENTO", "USU_RANGOINGRESOS")], 1, count_empty_na)
+
+# Filter out rows with a count greater than 1
+PJ_final_users <- PJ_final_users %>%
+  filter(empty_na_count != 2)
+
+# Remove the entire column empty_na_count
+PJ_final_users <- PJ_final_users %>%
+  select(-empty_na_count) 
+
+
+```
+
+Compare before after outlier removal in PF and PJ
+
+```{r}
+# Create frequency tables for IND_CLIENTE in both datasets
+final_users_table1 <- table(PJ_final_users$IND_CLIENTE)
+users_table1 <- table(PJ_users$IND_CLIENTE)
+
+# Create frequency tables for IND_CLIENTE in both datasets
+final_users_table2 <- table(PF_final_users$IND_CLIENTE)
+users_table2 <- table(PF_users$IND_CLIENTE)
+
+print("PJ")
+print(final_users_table1)
+print(users_table1)
+print("PF")
+print(final_users_table1)
+print(users_table2)
+
+rm(final_users_table2)
+rm(users_table1)
+rm(final_users_table2)
+rm(users_table2)
+```
+
+
+# Encoding 
+
+PJ_final_users_encoded
+```{r}
+variables_to_encode <- c("USU_DEPARTAMENTO", "CANAL_REGISTRO", "USU_RANGOINGRESOS")
+PJ_final_users[PJ_final_users == ""] <- NA  # To convert all empty spaces into NA (needed for encoding)
+formula <- as.formula(paste("~", paste(variables_to_encode, collapse = " + "))) # generates 
+model.frame <- model.frame(formula, data = PJ_final_users[,variables_to_encode],
+            subset = NULL, na.action= NULL,
+            drop.unused.levels = FALSE, xlev = NULL) # creates a new dataframe with the NA values allowed 
+
+dummy <- dummyVars(formula, data = model.frame)
+PJ_final_users_encoded <- data.frame(predict(dummy, newdata = model.frame))
+
+
+PJ_final_users_encoded <- cbind(PJ_final_users[,c(1:4)], PJ_final_users_encoded)
+
+
+PJ_final_users_encoded[is.na(PJ_final_users_encoded)] <- 0
+
+colnames(PJ_final_users_encoded)
+
+```
+
+PF_final_users_encoded
+
+```{r}
+# Define the variable to encode
+variables_to_encode1 <- c("CANAL_REGISTRO")
+
+# Convert all empty spaces into NA
+PF_final_users[PF_final_users == ""] <- NA
+
+# Create a formula for the model.frame function
+formula <- as.formula(paste("~", paste(variables_to_encode1, collapse = " + ")))
+
+# Subset the data frame and ensure it's a data frame
+subset_data <- as.data.frame(PF_final_users[, variables_to_encode1, drop = FALSE])
+
+# Create a new data frame with the NA values allowed
+model_frame <- model.frame(formula, data = subset_data, subset = NULL, 
+                           na.action = NULL, drop.unused.levels = FALSE, xlev = NULL)
+
+# Print the resulting model frame
+print(model_frame)
+
+
+dummy <- dummyVars(formula, data = model_frame)
+PF_final_users_encoded <- data.frame(predict(dummy, newdata = model_frame))
+
+
+PF_final_users_encoded <- cbind(PF_final_users[,c(1:4)], PF_final_users_encoded)
+
+
+PF_final_users_encoded[is.na(PF_final_users_encoded)] <- 0
+
+colnames(PF_final_users_encoded)
+
+
+```
+
+Factor and remove lineal
+
+```{r}
+
+# Convert specified columns to factors
+PF_final_users_encoded <- PF_final_users_encoded %>%
+  mutate(
+    CANAL_REGISTROPopular.directories = as.factor(CANAL_REGISTROPopular.directories),
+    CANAL_REGISTROSEM = as.factor(CANAL_REGISTROSEM),
+    CANAL_REGISTROSpecialized.Directories = as.factor(CANAL_REGISTROSpecialized.Directories),
+    CANAL_REGISTROWeb.Propia = as.factor(CANAL_REGISTROWeb.Propia),
+    IND_CLIENTE = as.factor(IND_CLIENTE)
+  )
+
+# Verify the transformation
+str(PF_final_users_encoded)
+```
+```{r}
+
+# Convert specified columns to factors
+PJ_final_users_encoded <- PJ_final_users_encoded %>%
+  mutate(
+    IND_CLIENTE = as.factor(IND_CLIENTE),
+    USU_DEPARTAMENTO = as.factor(USU_DEPARTAMENTO),
+    USU_DEPARTAMENTOCAPITAL = as.factor(USU_DEPARTAMENTOCAPITAL),
+    USU_DEPARTAMENTOINTERIOR = as.factor(USU_DEPARTAMENTOINTERIOR),
+    CANAL_REGISTROPopular.directories = as.factor(CANAL_REGISTROPopular.directories),
+    CANAL_REGISTROSEM = as.factor(CANAL_REGISTROSEM),
+    CANAL_REGISTROSpecialized.Directories = as.factor(CANAL_REGISTROSpecialized.Directories),
+    CANAL_REGISTROWeb.Propia = as.factor(CANAL_REGISTROWeb.Propia),
+    USU_RANGOINGRESOS..1500M = as.factor(USU_RANGOINGRESOS..1500M),
+    USU_RANGOINGRESOS.1500M = as.factor(USU_RANGOINGRESOS.1500M),
+    USU_RANGOINGRESOSDESCONOCIDO = as.factor(USU_RANGOINGRESOSDESCONOCIDO)
+  )
+
+# Verify the transformation
+str(PJ_final_users_encoded)
+
+```
+
+## Undersample PF PJ
+
+```{r}
+
+#### PJ
+
+# Set the seed for reproducibility
+set.seed(42)
+
+# Count the number of observations for each class
+class_counts <- table(PF_final_users_encoded$IND_CLIENTE)
+
+# Find the minority class
+minority_class <- which.min(class_counts)
+print(minority_class)
+
+# Set the number of samples for the minority class
+n_samples_minority <- min(class_counts)
+
+# Perform random undersampling
+undersampled_PF_final_users_encoded <- PF_final_users_encoded %>%
+  group_by(IND_CLIENTE) %>%
+  sample_n(n_samples_minority) %>%
+  ungroup()
+
+# Check the class distribution in the undersampled dataset
+print(table(undersampled_PF_final_users_encoded$IND_CLIENTE))
+
+#### PJ
+
+# Set the seed for reproducibility
+set.seed(42)
+
+# Count the number of observations for each class
+class_counts <- table(PJ_final_users_encoded$IND_CLIENTE)
+
+# Find the minority class
+minority_class <- which.min(class_counts)
+print(minority_class)
+
+# Set the number of samples for the minority class
+n_samples_minority <- min(class_counts)
+
+# Perform random undersampling
+undersampled_PJ_final_users_encoded <- PJ_final_users_encoded %>%
+  group_by(IND_CLIENTE) %>%
+  sample_n(n_samples_minority) %>%
+  ungroup()
+
+# Check the class distribution in the undersampled dataset
+print(table(undersampled_PJ_final_users_encoded$IND_CLIENTE))
+
+rm(n_samples_minority)
+rm(minority_class)
+
+```
+
+## Oversample PF PJ
+
+```{r}
+
+# Perform random oversampling
+PF_oversampled_data <- ovun.sample(IND_CLIENTE ~ ., data = PF_final_users_encoded, method = "over", p = 0.5, seed = 123)
+
+# Create a new dataframe with the oversampled data
+oversampled_PF <- data.frame(PF_oversampled_data$data)
+
+# Print class distribution after oversampling
+table(oversampled_PF$IND_CLIENTE)
+
+
+# Perform random oversampling
+PJ_oversampled_data <- ovun.sample(IND_CLIENTE ~ ., data = PJ_final_users_encoded, method = "over", p = 0.5, seed = 123)
+
+# Create a new dataframe with the oversampled data
+oversampled_PJ <- data.frame(PJ_oversampled_data$data)
+
+# Print class distribution after oversampling
+table(oversampled_PJ$IND_CLIENTE)
+
+```
+
+# GLM PJ original dataset
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Determine the number of rows in the data
+n_rows <- nrow(PJ_final_users_encoded)
+
+
+# Create a vector of indices for the train and test set
+train_index <- sample(1:n_rows, 0.8 * n_rows)
+
+# Split data into training and testing sets
+train_data <- PJ_final_users_encoded[train_index, ]
+test_data <- PJ_final_users_encoded[-train_index, ]
+
+# Fit logistic regression model on training data with increased maximum iterations
+model <- glm(IND_CLIENTE ~ TOTALSESIONES + PEFILESCONSUMIDOS +
+                  USU_DEPARTAMENTOCAPITAL + USU_DEPARTAMENTOINTERIOR +
+                  CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                  CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia +
+                  USU_RANGOINGRESOS..1500M + USU_RANGOINGRESOS.1500M, 
+                  data = train_data, family = binomial, maxit = 100)
+
+
+# Predict on test data
+predictions <- predict(model, newdata = test_data, type = "response")
+
+# Convert probabilities to binary predictions
+binary_predictions <- ifelse(predictions > 0.4, 1, 0)
+
+# Create confusion matrix
+conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+
+
+# Plot confusion matrix (assuming you have ggplot2 library installed)
+library(ggplot2)
+ggplot(data.frame(conf_matrix), aes(x = Actual, y = Predicted, fill = as.factor(Freq))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  labs(x = "Actual", y = "Predicted") +
+  ggtitle("Confusion Matrix") +
+  theme_minimal()
+# Extract values from confusion matrix
+TP <- conf_matrix[2, 2]  # True Positive
+TN <- conf_matrix[1, 1]  # True Negative
+FP <- conf_matrix[1, 2]  # False Positive
+FN <- conf_matrix[2, 1]  # False Negative
+
+# Calculate accuracy
+accuracy <- (TP + TN) / sum(conf_matrix)
+
+# Calculate recall
+recall <- TP / (TP + FN)
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Calculate F-measure (F1-score)
+f_measure <- 2 * (precision * recall) / (precision + recall)
+
+# Print accuracy, recall, precision, and F-measure
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Recall:", round(recall, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("F-measure:", round(f_measure, 4)))
+
+summary(model)
+```
+# Original Dataset GLM PF
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Determine the number of rows in the data
+n_rows <- nrow(PF_final_users_encoded)
+
+
+# Create a vector of indices for the train and test set
+train_index <- sample(1:n_rows, 0.8 * n_rows)
+
+# Split data into training and testing sets
+train_data <- PF_final_users_encoded[train_index, ]
+test_data <- PF_final_users_encoded[-train_index, ]
+
+# Fit logistic regression model on training data with increased maximum iterations
+model <- glm(IND_CLIENTE ~ TOTALSESIONES + PEFILESCONSUMIDOS + MAXSESIONESDIA +
+                  CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                  CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia, 
+                  data = train_data, family = binomial, maxit = 100)
+
+
+# Predict on test data
+predictions <- predict(model, newdata = test_data, type = "response")
+
+# Convert probabilities to binary predictions
+binary_predictions <- ifelse(predictions > 0.4, 1, 0)
+
+# Create confusion matrix
+conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+
+
+# Plot confusion matrix (assuming you have ggplot2 library installed)
+library(ggplot2)
+ggplot(data.frame(conf_matrix), aes(x = Actual, y = Predicted, fill = as.factor(Freq))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  labs(x = "Actual", y = "Predicted") +
+  ggtitle("Confusion Matrix") +
+  theme_minimal()
+# Extract values from confusion matrix
+TP <- conf_matrix[2, 2]  # True Positive
+TN <- conf_matrix[1, 1]  # True Negative
+FP <- conf_matrix[1, 2]  # False Positive
+FN <- conf_matrix[2, 1]  # False Negative
+
+# Calculate accuracy
+accuracy <- (TP + TN) / sum(conf_matrix)
+
+# Calculate recall
+recall <- TP / (TP + FN)
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Calculate F-measure (F1-score)
+f_measure <- 2 * (precision * recall) / (precision + recall)
+
+# Print accuracy, recall, precision, and F-measure
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Recall:", round(recall, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("F-measure:", round(f_measure, 4)))
+
+summary(model)
+```
+
+## GLM UNDERSAMPLED PF
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Determine the number of rows in the data
+n_rows <- nrow(undersampled_PF_final_users_encoded)
+
+
+# Create a vector of indices for the train and test set
+train_index <- sample(1:n_rows, 0.8 * n_rows)
+
+# Split data into training and testing sets
+train_data <- undersampled_PF_final_users_encoded[train_index, ]
+test_data <- undersampled_PF_final_users_encoded[-train_index, ]
+
+# Fit logistic regression model on training data with increased maximum iterations
+model <- glm(IND_CLIENTE ~ TOTALSESIONES + PEFILESCONSUMIDOS + MAXSESIONESDIA +
+                  CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                  CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia, 
+                  data = train_data, family = binomial, maxit = 100)
+
+
+# Predict on test data
+predictions <- predict(model, newdata = test_data, type = "response")
+
+# Convert probabilities to binary predictions
+binary_predictions <- ifelse(predictions > 0.4, 1, 0)
+
+# Create confusion matrix
+conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+
+
+# Plot confusion matrix (assuming you have ggplot2 library installed)
+library(ggplot2)
+ggplot(data.frame(conf_matrix), aes(x = Actual, y = Predicted, fill = as.factor(Freq))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  labs(x = "Actual", y = "Predicted") +
+  ggtitle("Confusion Matrix") +
+  theme_minimal()
+# Extract values from confusion matrix
+TP <- conf_matrix[2, 2]  # True Positive
+TN <- conf_matrix[1, 1]  # True Negative
+FP <- conf_matrix[1, 2]  # False Positive
+FN <- conf_matrix[2, 1]  # False Negative
+
+# Calculate accuracy
+accuracy <- (TP + TN) / sum(conf_matrix)
+
+# Calculate recall
+recall <- TP / (TP + FN)
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Calculate F-measure (F1-score)
+f_measure <- 2 * (precision * recall) / (precision + recall)
+
+# Print accuracy, recall, precision, and F-measure
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Recall:", round(recall, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("F-measure:", round(f_measure, 4)))
+
+summary(model)
+```
+
+
+## GLM OVERSAMPLED PF
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Determine the number of rows in the data
+n_rows <- nrow(oversampled_PF)
+
+
+# Create a vector of indices for the train and test set
+train_index <- sample(1:n_rows, 0.8 * n_rows)
+
+# Split data into training and testing sets
+train_data <- oversampled_PF[train_index, ]
+test_data <- oversampled_PF[-train_index, ]
+
+# Fit logistic regression model on training data with increased maximum iterations
+model <- glm(IND_CLIENTE ~ TOTALSESIONES + PEFILESCONSUMIDOS + MAXSESIONESDIA +
+                  CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                  CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia, 
+                  data = train_data, family = binomial, maxit = 100)
+
+
+# Predict on test data
+predictions <- predict(model, newdata = test_data, type = "response")
+
+# Convert probabilities to binary predictions
+binary_predictions <- ifelse(predictions > 0.4, 1, 0)
+
+# Create confusion matrix
+conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+
+
+# Plot confusion matrix (assuming you have ggplot2 library installed)
+library(ggplot2)
+ggplot(data.frame(conf_matrix), aes(x = Actual, y = Predicted, fill = as.factor(Freq))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  labs(x = "Actual", y = "Predicted") +
+  ggtitle("Confusion Matrix") +
+  theme_minimal()
+# Extract values from confusion matrix
+TP <- conf_matrix[2, 2]  # True Positive
+TN <- conf_matrix[1, 1]  # True Negative
+FP <- conf_matrix[1, 2]  # False Positive
+FN <- conf_matrix[2, 1]  # False Negative
+
+# Calculate accuracy
+accuracy <- (TP + TN) / sum(conf_matrix)
+
+# Calculate recall
+recall <- TP / (TP + FN)
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Calculate F-measure (F1-score)
+f_measure <- 2 * (precision * recall) / (precision + recall)
+
+# Print accuracy, recall, precision, and F-measure
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Recall:", round(recall, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("F-measure:", round(f_measure, 4)))
+
+summary(model)
+```
+
+
+## GLM UNDERSAMPLED PJ
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Determine the number of rows in the data
+n_rows <- nrow(undersampled_PJ_final_users_encoded)
+
+
+# Create a vector of indices for the train and test set
+train_index <- sample(1:n_rows, 0.8 * n_rows)
+
+# Split data into training and testing sets
+train_data <- undersampled_PJ_final_users_encoded[train_index, ]
+test_data <- undersampled_PJ_final_users_encoded[-train_index, ]
+
+# Fit logistic regression model on training data with increased maximum iterations
+model <- glm(IND_CLIENTE ~ TOTALSESIONES + PEFILESCONSUMIDOS +
+                  USU_DEPARTAMENTOCAPITAL + USU_DEPARTAMENTOINTERIOR +
+                  CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                  CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia +
+                  USU_RANGOINGRESOS..1500M + USU_RANGOINGRESOS.1500M, 
+                  data = train_data, family = binomial, maxit = 100)
+
+
+# Predict on test data
+predictions <- predict(model, newdata = test_data, type = "response")
+
+# Convert probabilities to binary predictions
+binary_predictions <- ifelse(predictions > 0.4, 1, 0)
+
+# Create confusion matrix
+conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+
+
+# Plot confusion matrix (assuming you have ggplot2 library installed)
+library(ggplot2)
+ggplot(data.frame(conf_matrix), aes(x = Actual, y = Predicted, fill = as.factor(Freq))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  labs(x = "Actual", y = "Predicted") +
+  ggtitle("Confusion Matrix") +
+  theme_minimal()
+# Extract values from confusion matrix
+TP <- conf_matrix[2, 2]  # True Positive
+TN <- conf_matrix[1, 1]  # True Negative
+FP <- conf_matrix[1, 2]  # False Positive
+FN <- conf_matrix[2, 1]  # False Negative
+
+# Calculate accuracy
+accuracy <- (TP + TN) / sum(conf_matrix)
+
+# Calculate recall
+recall <- TP / (TP + FN)
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Calculate F-measure (F1-score)
+f_measure <- 2 * (precision * recall) / (precision + recall)
+
+# Print accuracy, recall, precision, and F-measure
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Recall:", round(recall, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("F-measure:", round(f_measure, 4)))
+
+summary(model)
+```
+
+
+## GLM OVERSAMPLED PJ
+
+
+```{r}
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Determine the number of rows in the data
+n_rows <- nrow(oversampled_PJ)
+
+
+# Create a vector of indices for the train and test set
+train_index <- sample(1:n_rows, 0.8 * n_rows)
+
+# Split data into training and testing sets
+train_data <- oversampled_PJ[train_index, ]
+test_data <- oversampled_PJ[-train_index, ]
+
+# Fit logistic regression model on training data with increased maximum iterations
+model <- glm(IND_CLIENTE ~ TOTALSESIONES + PEFILESCONSUMIDOS +
+                  USU_DEPARTAMENTOCAPITAL + USU_DEPARTAMENTOINTERIOR +
+                  CANAL_REGISTROPopular.directories + CANAL_REGISTROSEM +
+                  CANAL_REGISTROSpecialized.Directories + CANAL_REGISTROWeb.Propia +
+                  USU_RANGOINGRESOS..1500M + USU_RANGOINGRESOS.1500M, 
+                  data = train_data, family = binomial, maxit = 100)
+
+
+# Predict on test data
+predictions <- predict(model, newdata = test_data, type = "response")
+
+# Convert probabilities to binary predictions
+binary_predictions <- ifelse(predictions > 0.4, 1, 0)
+
+# Create confusion matrix
+conf_matrix <- table(Actual = test_data$IND_CLIENTE, Predicted = binary_predictions)
+
+
+# Plot confusion matrix (assuming you have ggplot2 library installed)
+library(ggplot2)
+ggplot(data.frame(conf_matrix), aes(x = Actual, y = Predicted, fill = as.factor(Freq))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  labs(x = "Actual", y = "Predicted") +
+  ggtitle("Confusion Matrix") +
+  theme_minimal()
+# Extract values from confusion matrix
+TP <- conf_matrix[2, 2]  # True Positive
+TN <- conf_matrix[1, 1]  # True Negative
+FP <- conf_matrix[1, 2]  # False Positive
+FN <- conf_matrix[2, 1]  # False Negative
+
+# Calculate accuracy
+accuracy <- (TP + TN) / sum(conf_matrix)
+
+# Calculate recall
+recall <- TP / (TP + FN)
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Calculate F-measure (F1-score)
+f_measure <- 2 * (precision * recall) / (precision + recall)
+
+# Print accuracy, recall, precision, and F-measure
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Recall:", round(recall, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("F-measure:", round(f_measure, 4)))
+
+summary(model)
+```
+
+# Bibliography
+
+Altman, N., Krzywinski, M. Association, correlation and causation. Nat Methods 12, 899–900 (2015). https://doi.org/10.1038/nmeth.3587
